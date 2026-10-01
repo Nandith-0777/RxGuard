@@ -1,18 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import { AiVerified, DbFact, Escalation, Template } from "./Badges";
-import type { Prescription } from "../types";
-
-interface AskResult {
-  answer: string;
-  mode: string;
-  claims: { claim_id: string; text: string; source_type: string; source_id: number }[];
-  dropped: { claim_id: string; reason: string }[];
-  tool_trace: { tool: string; args: Record<string, unknown>; status: string; result?: string }[];
-  escalations: { reason_code: string; rule_id: string }[];
-  evidence_cards: { chunk_id: number; document: string; section: string; text: string }[];
-  correlation_id: string;
-}
+import { useI18n } from "../i18n";
+import type { AskResult, Prescription } from "../types";
+import { Spinner, Tag } from "./Badges";
+import Icon from "./Icon";
+import { TranslationOf, useTranslations } from "./Translate";
 
 interface Msg {
   role: "user" | "assistant";
@@ -21,20 +13,28 @@ interface Msg {
 }
 
 export default function AskPanel({ rx }: { rx: Prescription }) {
+  const { t } = useI18n();
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const end = useRef<HTMLDivElement>(null);
+  const tr = useTranslations(msgs.filter((m) => m.role === "assistant").map((m) => m.content));
 
   useEffect(() => {
     if (!rx.session_id) return;
-    api(`/api/v1/sessions/${rx.session_id}`).then((s) =>
-      setMsgs(s.messages.filter((m: any) => m.role !== "system" && m.prescription_id === rx.id)),
-    );
+    api<{ messages: (Msg & { prescription_id: number | null })[] }>(`/api/v1/sessions/${rx.session_id}`)
+      .then((s) => {
+        const loaded = s.messages.filter((m) => (m.role === "user" || m.role === "assistant") && m.prescription_id === rx.id);
+        setMsgs((cur) => (cur.length ? cur : loaded)); // never overwrite a question asked while history was loading
+      })
+      .catch(() => undefined);
   }, [rx.session_id, rx.id]);
 
+  useEffect(() => end.current?.scrollIntoView({ block: "nearest" }), [msgs.length]);
+
   const ask = async (question: string) => {
-    if (!rx.session_id || !question.trim()) return;
+    if (!rx.session_id || !question.trim() || busy) return;
     setBusy(true);
     setErr("");
     setMsgs((m) => [...m, { role: "user", content: question }]);
@@ -50,71 +50,65 @@ export default function AskPanel({ rx }: { rx: Prescription }) {
   };
 
   return (
-    <div className="card">
-      <h2>Follow-up questions</h2>
-      <p className="small muted" style={{ marginTop: 0 }}>
-        The agent plans up to 3 read-only tool calls and answers only from their output. It cannot approve, dose or prescribe.
-      </p>
-      <div className="chat">
+    <div className="ask">
+      <p className="muted small">{t("ask.help")}</p>
+      <div className="chat" aria-live="polite">
+        {msgs.length === 0 && <p className="panel-empty-line">{t("ask.empty")}</p>}
         {msgs.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
-            <div>{m.content}</div>
-            {m.payload && <AnswerMeta p={m.payload} />}
+            <p>{m.content}</p>
+            {m.role === "assistant" && <TranslationOf text={m.content} get={tr} />}
+            {m.payload && (m.payload.mode === "refusal" || m.payload.mode === "insufficient") && (
+              <Tag tone="warn">{m.payload.mode === "refusal" ? t("ask.refusal") : t("ask.insufficient")}</Tag>
+            )}
+            {!!m.payload?.evidence_cards?.length && (
+              <ul className="ask-cards">
+                {m.payload.evidence_cards.slice(0, 2).map((c) => (
+                  <li key={c.chunk_id}>
+                    <b>{c.document}</b> · {c.section}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!!m.payload?.tool_trace?.length && (
+              <details className="trace">
+                <summary>Tools used ({m.payload.tool_trace.length})</summary>
+                {m.payload.tool_trace.map((x, j) => (
+                  <div key={j} className="code">
+                    {x.tool} [{x.status}] {x.result ?? ""}
+                  </div>
+                ))}
+              </details>
+            )}
           </div>
         ))}
+        {busy && (
+          <div className="msg assistant">
+            <Spinner />
+          </div>
+        )}
+        <div ref={end} />
       </div>
-      {err && <div className="error">{err}</div>}
-      <div className="row">
-        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. Why was the second one flagged?"
-          onKeyDown={(e) => e.key === "Enter" && ask(q)} style={{ flex: 1 }} />
-        <button className="btn primary" onClick={() => ask(q)} disabled={busy || !rx.session_id}>
-          {busy ? <span className="spin" /> : "Ask"}
-        </button>
-      </div>
-      <div className="row small" style={{ marginTop: 6 }}>
-        {["Why was the second one flagged?", "Is warfarin in NLEM 2022, and at which level of care?"].map((s) => (
-          <button key={s} className="btn sm" onClick={() => ask(s)} disabled={busy}>{s}</button>
+      {err && <p className="err-text" role="alert">{err}</p>}
+      <div className="suggest">
+        {[t("ask.s1"), t("ask.s2")].map((s) => (
+          <button key={s} type="button" className="chip" onClick={() => ask(s)} disabled={busy}>
+            {s}
+          </button>
         ))}
       </div>
-    </div>
-  );
-}
-
-function AnswerMeta({ p }: { p: Partial<AskResult> }) {
-  return (
-    <div className="small" style={{ marginTop: 6 }}>
-      <div className="row">
-        {p.mode === "llm" ? <AiVerified /> : p.mode === "template" ? <Template /> : <span className="badge tpl">{p.mode?.toUpperCase()}</span>}
-        {p.escalations?.map((e, i) => <Escalation key={i} code={e.reason_code} />)}
-      </div>
-      {!!p.claims?.length && (
-        <div style={{ marginTop: 4 }}>
-          {p.claims.map((c) => (
-            <div key={c.claim_id} className="row">
-              {c.source_type === "DATABASE" ? <DbFact /> : <AiVerified />}
-              <span className="mono">{c.claim_id} → {c.source_type === "DATABASE" ? "interaction" : "chunk"} {c.source_id}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {!!p.dropped?.length && <div style={{ color: "var(--p2)" }}>{p.dropped.length} claim(s) removed by the verifier</div>}
-      {!!p.evidence_cards?.length && p.mode !== "llm" && (
-        <div style={{ marginTop: 4 }}>
-          {p.evidence_cards.slice(0, 2).map((c) => (
-            <div key={c.chunk_id} className="evidence">
-              <div className="meta"><b>{c.document}</b> · {c.section} · chunk {c.chunk_id} · source text, not AI-generated</div>
-              <blockquote>{c.text.slice(0, 400)}</blockquote>
-            </div>
-          ))}
-        </div>
-      )}
-      {!!p.tool_trace?.length && (
-        <div className="trace" style={{ marginTop: 4 }}>
-          {p.tool_trace.map((t, i) => (
-            <div key={i}>{t.tool}({JSON.stringify(t.args)}) [{t.status}] {t.result ?? ""}</div>
-          ))}
-        </div>
-      )}
+      <form
+        className="ask-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          ask(q);
+        }}
+      >
+        <input id="ask-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("ask.ph")} aria-label={t("ask.ph")} maxLength={1000} />
+        <button className="btn primary" disabled={busy || !q.trim()} aria-label={t("ask.send")}>
+          <Icon name="chat" size={16} /> {t("ask.send")}
+        </button>
+      </form>
     </div>
   );
 }

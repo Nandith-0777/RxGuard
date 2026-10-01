@@ -1,93 +1,95 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Prio } from "../components/Badges";
-import type { Priority } from "../types";
+import { useI18n } from "../i18n";
+import { patientForRx } from "../patients";
+import type { QueueRow } from "../types";
+import { fmtDateTime, PriorityPill, Spinner, StatusText } from "../components/Badges";
+import { usePatients } from "../components/PatientPicker";
+import { navigate } from "../router";
 
-interface Row {
-  id: number;
-  status: string;
-  priority: Priority;
-  created_at: string;
-  interaction_count: number;
-  unresolved_count: number;
-  escalation_count: number;
-  reviewed_count: number;
-  injection_flag: boolean;
-  kb_version: string;
-  first_line: string;
-}
+const OPEN = new Set(["AWAITING_PHARMACIST", "IN_REVIEW", "CHECKED", "EXPLAINED"]);
 
-export default function Queue({ open }: { open: (id: number) => void }) {
-  const [rows, setRows] = useState<Row[] | null>(null);
+export default function Queue() {
+  const { t, lang } = useI18n();
+  usePatients(); // re-render when patient links change
+  const [rows, setRows] = useState<QueueRow[] | null>(null);
   const [err, setErr] = useState("");
+  const [filter, setFilter] = useState<"open" | "all">("open");
+
   useEffect(() => {
-    api<{ results: Row[] }>("/api/v1/prescriptions")
-      .then((r) => setRows(r.results))
-      .catch((e) => setErr(String(e.message)));
+    api<{ results: QueueRow[] }>("/api/v1/prescriptions").then((r) => setRows(r.results)).catch((e) => setErr(e.message));
   }, []);
+
+  const shown = (rows ?? []).filter((r) => filter === "all" || OPEN.has(r.status));
+  const openCount = (rows ?? []).filter((r) => OPEN.has(r.status)).length;
+
   return (
-    <>
-      <div className="row spread" style={{ marginBottom: 14 }}>
+    <div className="page">
+      <header className="page-head">
         <div>
-          <h1>Review queue</h1>
-          <div className="sub">Open prescriptions first, then by priority. Priority is a queue-ordering label, not a clinical risk score.</div>
+          <h1>{t("queue.title")}</h1>
+          <p className="muted">{t("queue.sub")}</p>
         </div>
-        <button className="btn primary" onClick={() => (window.location.hash = "/new")}>
-          New check
-        </button>
-      </div>
-      {err && <div className="error">{err}</div>}
-      <div className="card" style={{ padding: 0, overflowX: "auto" }}>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Priority</th>
-              <th>Status</th>
-              <th>Interactions</th>
-              <th>Unresolved</th>
-              <th>Escalations</th>
-              <th>Reviewed</th>
-              <th>KB</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows?.map((r) => (
-              <tr key={r.id} className="clickable" onClick={() => open(r.id)}>
-                <td className="mono">#{r.id}</td>
-                <td>
-                  <Prio p={r.priority} />
-                </td>
-                <td>
-                  {r.status.replace(/_/g, " ").toLowerCase()}
-                  {r.injection_flag && <span className="badge esc" style={{ marginLeft: 6 }}>INJECTION</span>}
-                </td>
-                <td>{r.interaction_count}</td>
-                <td>{r.unresolved_count ? <b style={{ color: "var(--insuff)" }}>{r.unresolved_count}</b> : 0}</td>
-                <td>{r.escalation_count}</td>
-                <td>
-                  {r.reviewed_count}/{r.interaction_count}
-                </td>
-                <td className="mono">{r.kb_version}</td>
-                <td className="small muted">{new Date(r.created_at).toLocaleString()}</td>
-              </tr>
-            ))}
-            {rows && rows.length === 0 && (
+        <div className="seg" role="tablist">
+          <button role="tab" aria-selected={filter === "open"} className={filter === "open" ? "on" : ""} onClick={() => setFilter("open")}>
+            {t("queue.open")} <span className="count">{openCount}</span>
+          </button>
+          <button role="tab" aria-selected={filter === "all"} className={filter === "all" ? "on" : ""} onClick={() => setFilter("all")}>
+            {t("queue.all")} <span className="count">{rows?.length ?? 0}</span>
+          </button>
+        </div>
+      </header>
+      {err && <p className="err-text">{err}</p>}
+      {!rows && !err && <Spinner />}
+      {rows && shown.length === 0 && <p className="empty">{t("queue.empty")}</p>}
+      {shown.length > 0 && (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
               <tr>
-                <td colSpan={9} className="muted" style={{ padding: 24, textAlign: "center" }}>
-                  No prescriptions yet. Start a new check or load the demo prescription.
-                </td>
+                <th>{t("queue.colPriority")}</th>
+                <th>{t("queue.colPatient")}</th>
+                <th>{t("queue.colRx")}</th>
+                <th className="num">{t("queue.colFindings")}</th>
+                <th>{t("queue.colStatus")}</th>
+                <th>{t("queue.colTime")}</th>
               </tr>
-            )}
-          </tbody>
-        </table>
-        {!rows && !err && (
-          <div style={{ padding: 20 }}>
-            <span className="spin" /> Loading…
-          </div>
-        )}
-      </div>
-    </>
+            </thead>
+            <tbody>
+              {shown.map((r) => {
+                const p = patientForRx(r.id);
+                const meds = p?.checks.find((c) => c.rxId === r.id)?.medicines.join(", ") || (/^rx\.?$/i.test(r.first_line.trim()) ? "" : r.first_line);
+                return (
+                  <tr key={r.id} className={`prio-row-${r.priority}`} tabIndex={0} onClick={() => navigate(`/rx/${r.id}`)} onKeyDown={(e) => e.key === "Enter" && navigate(`/rx/${r.id}`)}>
+                    <td><PriorityPill p={r.priority} /></td>
+                    <td>
+                      {p ? (
+                        <>
+                          <b>{p.name}</b>
+                          <div className="meta">{t("patient.years", { n: p.age })}, {t(`patient.${p.sex}`)}</div>
+                        </>
+                      ) : (
+                        <span className="muted">{t("queue.unlinked")}</span>
+                      )}
+                    </td>
+                    <td>
+                      <span className="code">#{r.id}</span>
+                      {meds && <div className="meta clamp">{meds}</div>}
+                      {r.unresolved_count > 0 && <div className="warn-text meta">{t("queue.unresolved", { n: r.unresolved_count })}</div>}
+                    </td>
+                    <td className="num">
+                      {r.interaction_count}
+                      {r.interaction_count > 0 && <div className="meta">{r.reviewed_count} ✓</div>}
+                    </td>
+                    <td><StatusText s={r.status} /></td>
+                    <td className="meta">{fmtDateTime(r.created_at, lang)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
