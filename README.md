@@ -48,7 +48,8 @@ python -m venv .venv && .venv/Scripts/pip install torch --index-url https://down
 .venv/Scripts/pip install -r backend/requirements.txt
 docker run -d --name rxguard-mysql-dev -e MYSQL_ROOT_PASSWORD=devroot -e MYSQL_DATABASE=rxguard \
   -e MYSQL_USER=rxguard -e MYSQL_PASSWORD=devpass -p 3307:3306 mysql:8.4
-source scripts/dev.env                       # dev-only settings (DEBUG on, demo password, demo toggles)
+   cp scripts/dev.env.example scripts/dev.env   # then set your own passwords in it
+   source scripts/dev.env                       # dev-only settings (DEBUG on, demo toggles)
 cd backend && ../.venv/Scripts/python manage.py migrate && ../.venv/Scripts/python manage.py seed
 ../.venv/Scripts/python manage.py runserver  # API on :8000
 cd ../frontend && npm install && npm run dev # UI on :5173 (proxies /api)
