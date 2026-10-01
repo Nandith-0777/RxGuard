@@ -1,130 +1,141 @@
-import { useEffect, useState } from "react";
-import { api, ApiError, getToken, setToken } from "./api";
-import Queue from "./pages/Queue";
+import { useEffect, useMemo, useState } from "react";
+import { api, DEMO_ONLY, getToken, isDemo, setDemo, setToken } from "./api";
+import { LangContext, makeT } from "./i18n";
+import { resetCache } from "./patients";
+import { Link, navigate, useRoute } from "./router";
+import type { Lang } from "./types";
+import Icon, { RxMark } from "./components/Icon";
+import LangSwitch from "./components/LangSwitch";
+import Login from "./pages/Login";
 import NewCheck from "./pages/NewCheck";
-import Detail from "./pages/Detail";
-import JudgePanel from "./pages/JudgePanel";
-import Observability from "./pages/Observability";
-import Sources from "./pages/Sources";
+import Review from "./pages/Review";
+import Queue from "./pages/Queue";
+import Patients from "./pages/Patients";
+import Evaluation from "./pages/Evaluation";
 
-export interface Me {
-  username: string;
-  is_admin: boolean;
-  demo_toggles_enabled: boolean;
-  kb_version: string | null;
-}
-
-// Minimal hash router: #/queue, #/new, #/rx/12, #/attack, #/obs, #/sources
-function useRoute(): [string[], (r: string) => void] {
-  const parse = () => (window.location.hash.replace(/^#\/?/, "") || "queue").split("/");
-  const [route, setRoute] = useState(parse);
-  useEffect(() => {
-    const on = () => setRoute(parse());
-    window.addEventListener("hashchange", on);
-    return () => window.removeEventListener("hashchange", on);
-  }, []);
-  return [route, (r) => (window.location.hash = "/" + r)];
+const LANG_KEY = "rxguard.lang";
+function initialLang(): Lang {
+  try {
+    const l = localStorage.getItem(LANG_KEY);
+    if (l === "en" || l === "ml" || l === "hi") return l;
+  } catch {
+    /* ignore */
+  }
+  return "en";
 }
 
 export default function App() {
-  const [me, setMe] = useState<Me | null>(null);
-  const [checked, setChecked] = useState(false);
-  const [route, go] = useRoute();
+  const [lang, setLangState] = useState<Lang>(initialLang);
+  const [user, setUser] = useState<string | null>(getToken() ? "…" : null);
+  const route = useRoute();
+  const ctx = useMemo(
+    () => ({
+      lang,
+      t: makeT(lang),
+      setLang: (l: Lang) => {
+        setLangState(l);
+        try {
+          localStorage.setItem(LANG_KEY, l);
+        } catch {
+          /* ignore */
+        }
+      },
+    }),
+    [lang],
+  );
 
   useEffect(() => {
-    if (!getToken()) return setChecked(true);
-    api<Me>("/api/v1/me")
-      .then(setMe)
-      .catch(() => setToken(null))
-      .finally(() => setChecked(true));
+    document.documentElement.lang = lang;
+  }, [lang]);
+
+  useEffect(() => {
+    if (!getToken()) return;
+    api<{ username: string }>("/api/v1/me")
+      .then((m) => setUser(m.username))
+      .catch(() => {
+        setToken(null);
+        setUser(null);
+      });
+    const out = () => setUser(null);
+    window.addEventListener("rxguard:signed-out", out);
+    return () => window.removeEventListener("rxguard:signed-out", out);
   }, []);
 
-  if (!checked) return null;
-  if (!me) return <Login onLogin={setMe} />;
+  const signOut = () => {
+    setToken(null);
+    if (!DEMO_ONLY) setDemo(false);
+    resetCache();
+    setUser(null);
+    navigate("/check");
+  };
 
-  const tabs: [string, string][] = [
-    ["queue", "Review queue"],
-    ["new", "New check"],
-    ["attack", "Judge Attack"],
-    ["obs", "Observability"],
-    ["sources", "Sources & licences"],
+  const t = ctx.t;
+  if (!user)
+    return (
+      <LangContext.Provider value={ctx}>
+        <Login
+          onSignedIn={(u) => {
+            resetCache();
+            setUser(u);
+          }}
+        />
+      </LangContext.Provider>
+    );
+
+  const [page, arg] = route;
+  const query = route.find((r) => r.startsWith("?"));
+  const patientParam = query ? new URLSearchParams(query.slice(1)).get("patient") ?? undefined : undefined;
+  const nav: { to: string; key: string; icon: string; match: string[] }[] = [
+    { to: "/check", key: "nav.check", icon: "plus", match: ["check"] },
+    { to: "/queue", key: "nav.queue", icon: "list", match: ["queue", "rx"] },
+    { to: "/patients", key: "nav.patients", icon: "users", match: ["patients"] },
+    { to: "/evaluation", key: "nav.eval", icon: "chart", match: ["evaluation"] },
   ];
-  const page = route[0];
+
+  let body: React.ReactNode;
+  if (page === "rx" && arg) body = <Review key={arg} id={Number(arg)} />;
+  else if (page === "queue") body = <Queue />;
+  else if (page === "patients") body = <Patients id={arg && !arg.startsWith("?") ? arg : undefined} />;
+  else if (page === "evaluation") body = <Evaluation />;
+  else body = <NewCheck key={patientParam ?? "new"} patientId={patientParam} />;
+
   return (
-    <>
-      <div className="synthetic-strip">SYNTHETIC DEMO DATA · decision support for pharmacists · not for patients</div>
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">Rx</span>RxGuard
-        </div>
-        <nav className="nav">
-          {tabs.map(([k, label]) => (
-            <button key={k} className={page === k ? "active" : ""} onClick={() => go(k)}>
-              {label}
+    <LangContext.Provider value={ctx}>
+      <a href="#main" className="skip">Skip to content</a>
+      {isDemo() && (
+        <div className="demo-strip" role="note">
+          <Icon name="info" size={15} /> {t("demo.banner")}
+          {!DEMO_ONLY && (
+            <button className="linkish" onClick={signOut}>
+              {t("demo.exit")}
             </button>
+          )}
+        </div>
+      )}
+      <header className="topbar">
+        <Link to="/check" className="brand">
+          <RxMark size={30} />
+          <span className="brand-name">RxGuard</span>
+        </Link>
+        <nav aria-label="Main">
+          {nav.map((n) => (
+            <Link key={n.to} to={n.to} className={n.match.includes(page ?? "check") || (!page && n.to === "/check") ? "on" : ""}>
+              <Icon name={n.icon} size={17} />
+              <span>{t(n.key)}</span>
+            </Link>
           ))}
         </nav>
-        <span className="who">
-          {me.username}
-          {me.is_admin ? " (admin)" : ""} · KB {me.kb_version ?? "—"}{" "}
-          <button
-            className="btn sm"
-            onClick={() => {
-              setToken(null);
-              setMe(null);
-            }}
-          >
-            Sign out
+        <div className="topbar-right">
+          <LangSwitch />
+          <span className="who" title={user}>
+            <Icon name="user" size={17} /> <span>{user}</span>
+          </span>
+          <button className="icon-btn" onClick={signOut} aria-label={t("common.signOut")} title={t("common.signOut")}>
+            <Icon name="logout" />
           </button>
-        </span>
+        </div>
       </header>
-      <main>
-        {page === "queue" && <Queue open={(id) => go(`rx/${id}`)} />}
-        {page === "new" && <NewCheck done={(id) => go(`rx/${id}`)} />}
-        {page === "rx" && route[1] && <Detail id={Number(route[1])} key={route[1]} />}
-        {page === "attack" && <JudgePanel me={me} open={(id) => go(`rx/${id}`)} />}
-        {page === "obs" && <Observability />}
-        {page === "sources" && <Sources />}
-      </main>
-    </>
-  );
-}
-
-function Login({ onLogin }: { onLogin: (m: Me) => void }) {
-  const [u, setU] = useState("");
-  const [p, setP] = useState("");
-  const [err, setErr] = useState("");
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErr("");
-    try {
-      const r = await api<{ token: string }>("/api/v1/auth/token", { body: { username: u, password: p } });
-      setToken(r.token);
-      onLogin(await api<Me>("/api/v1/me"));
-    } catch (ex) {
-      setErr(ex instanceof ApiError ? ex.message : String(ex));
-    }
-  };
-  return (
-    <div className="login card">
-      <div className="brand" style={{ marginBottom: 12 }}>
-        <span className="brand-mark">Rx</span>RxGuard
-      </div>
-      <p className="sub">Evidence-proven prescription review. Pharmacist sign-in only.</p>
-      <form onSubmit={submit} style={{ display: "grid", gap: 10 }}>
-        <label className="field">
-          Username
-          <input type="text" value={u} onChange={(e) => setU(e.target.value)} autoFocus />
-        </label>
-        <label className="field">
-          Password
-          <input type="password" value={p} onChange={(e) => setP(e.target.value)} />
-        </label>
-        {err && <div className="error">{err}</div>}
-        <button className="btn primary" type="submit">
-          Sign in
-        </button>
-      </form>
-    </div>
+      <main id="main">{body}</main>
+    </LangContext.Provider>
   );
 }
